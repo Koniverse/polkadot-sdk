@@ -48,6 +48,8 @@ mod receipt_extractor;
 pub use receipt_extractor::*;
 
 mod apis;
+mod kafka_producer;
+
 pub use apis::*;
 
 pub const LOG_TARGET: &str = "eth-rpc";

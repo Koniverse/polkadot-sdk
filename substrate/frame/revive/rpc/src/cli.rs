@@ -61,6 +61,10 @@ pub struct CliCommand {
 	#[clap(long, env = "DATABASE_URL", default_value = IN_MEMORY_DB)]
 	pub database_url: String,
 
+	/// Kafka brokers for indexing (optional)
+	#[clap(long, env = "KAFKA_BROKERS")]
+	pub kafka_brokers: Option<String>,
+
 	/// If provided, index the last n blocks
 	#[clap(long)]
 	pub index_last_n_blocks: Option<SubstrateBlockNumber>,
@@ -105,6 +109,7 @@ fn build_client(
 	earliest_receipt_block: Option<SubstrateBlockNumber>,
 	node_rpc_url: &str,
 	database_url: &str,
+	kafka_brokers: Option<String>,
 	abort_signal: Signals,
 ) -> anyhow::Result<Client> {
 	let fut = async {
@@ -139,7 +144,7 @@ fn build_client(
 			.await?;
 
 		let client =
-			Client::new(api, rpc_client, rpc, block_provider, receipt_provider).await?;
+			Client::new(api, rpc_client, rpc, block_provider, receipt_provider, kafka_brokers).await?;
 
 		Ok(client)
 	}
@@ -161,6 +166,7 @@ pub fn run(cmd: CliCommand) -> anyhow::Result<()> {
 		node_rpc_url,
 		cache_size,
 		database_url,
+		kafka_brokers,
 		earliest_receipt_block,
 		index_last_n_blocks,
 		shared_params,
@@ -206,6 +212,7 @@ pub fn run(cmd: CliCommand) -> anyhow::Result<()> {
 		earliest_receipt_block,
 		&node_rpc_url,
 		&database_url,
+		kafka_brokers,
 		tokio_runtime.block_on(async { Signals::capture() })?,
 	)?;
 

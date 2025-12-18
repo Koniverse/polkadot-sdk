@@ -1,0 +1,54 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: revive-kafka
+    ports:
+      - "9092:9092"      # host access
+      - "29092:29092"    # internal access
+    environment:
+      # --- KRaft Setup ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # --- Listeners ---
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://kafka:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # --- Storage (KRaft metadata) ---
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+      CLUSTER_ID: "revivepolkavmindexer12"
+
+      # --- Convenience ---
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - revive_indexer
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: revive-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: "http://does-not-exist:8081"
+      KAFKA_CLUSTERS_0_KAFKACONFIG_PROPERTIES_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+    networks:
+      - revive_indexer
+
+volumes:
+  kafka_data:
+
+networks:
+  revive_indexer:

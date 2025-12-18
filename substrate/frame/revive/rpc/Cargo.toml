@@ -20,6 +20,7 @@ name = "eth-rpc"
 path = "src/main.rs"
 
 [dependencies]
+rdkafka = "0.36"
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 codec = { workspace = true, features = ["derive"] }
