@@ -249,6 +249,89 @@ pub fn run(cmd: CliCommand) -> anyhow::Result<()> {
 	Ok(())
 }
 
+pub fn run_parser(cmd: CliCommand)  -> anyhow::Result<()> {
+	let CliCommand {
+		rpc_params,
+		prometheus_params,
+		node_rpc_url,
+		cache_size,
+		database_url,
+		earliest_receipt_block,
+		index_last_n_blocks,
+		shared_params,
+		..
+	} = cmd;
+
+	#[cfg(not(test))]
+	init_logger(&shared_params)?;
+	let is_dev = shared_params.dev;
+	let rpc_addrs: Option<Vec<sc_service::config::RpcEndpoint>> = rpc_params
+		.rpc_addr(is_dev, false, 8545)?
+		.map(|addrs| addrs.into_iter().map(Into::into).collect());
+
+	let rpc_config = RpcConfiguration {
+		addr: rpc_addrs,
+		methods: rpc_params.rpc_methods.into(),
+		max_connections: rpc_params.rpc_max_connections,
+		cors: rpc_params.rpc_cors(is_dev)?,
+		max_request_size: rpc_params.rpc_max_request_size,
+		max_response_size: rpc_params.rpc_max_response_size,
+		id_provider: None,
+		max_subs_per_conn: rpc_params.rpc_max_subscriptions_per_connection,
+		port: rpc_params.rpc_port.unwrap_or(DEFAULT_RPC_PORT),
+		message_buffer_capacity: rpc_params.rpc_message_buffer_capacity_per_connection,
+		batch_config: rpc_params.rpc_batch_config()?,
+		rate_limit: rpc_params.rpc_rate_limit,
+		rate_limit_whitelisted_ips: rpc_params.rpc_rate_limit_whitelisted_ips,
+		rate_limit_trust_proxy_headers: rpc_params.rpc_rate_limit_trust_proxy_headers,
+		request_logger_limit: if is_dev { 1024 * 1024 } else { 1024 },
+	};
+
+	let prometheus_config =
+		prometheus_params.prometheus_config(DEFAULT_PROMETHEUS_PORT, "eth-rpc".into());
+	let prometheus_registry = prometheus_config.as_ref().map(|config| &config.registry);
+
+	let tokio_runtime = sc_cli::build_runtime()?;
+	let tokio_handle = tokio_runtime.handle();
+	let mut task_manager = TaskManager::new(tokio_handle.clone(), prometheus_registry)?;
+
+	let client = build_client(
+		tokio_handle,
+		cache_size,
+		earliest_receipt_block,
+		&node_rpc_url,
+		&database_url,
+		tokio_runtime.block_on(async { Signals::capture() })?,
+	)?;
+
+	// Prometheus metrics.
+	if let Some(PrometheusConfig { port, registry }) = prometheus_config.clone() {
+		task_manager.spawn_handle().spawn(
+			"prometheus-endpoint",
+			None,
+			prometheus_endpoint::init_prometheus(port, registry).map(drop),
+		);
+	}
+
+	task_manager
+		.spawn_essential_handle()
+		.spawn("block-subscription", None, async move {
+			let mut futures: Vec<BoxFuture<'_, Result<(), _>>> = vec![
+				Box::pin(client.subscribe_latest_blocks(SubscriptionType::FinalizedBlocks)),
+				Box::pin(client.get_parsing_blocks(index_last_n_blocks.unwrap_or(0)))
+			];
+
+			if let Err(err) = futures::future::try_join_all(futures).await {
+				panic!("Block subscription task failed: {err:?}",)
+			}
+		});
+
+	// task_manager.keep_alive(rpc_server_handle);
+	let signals = tokio_runtime.block_on(async { Signals::capture() })?;
+	tokio_runtime.block_on(signals.run_until_signal(task_manager.future().fuse()))?;
+	Ok(())
+}
+
 /// Create the JSON-RPC module.
 fn rpc_module(is_dev: bool, client: Client) -> Result<RpcModule<()>, sc_service::Error> {
 	let eth_api = EthRpcServerImpl::new(client.clone())

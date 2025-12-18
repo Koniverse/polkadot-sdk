@@ -20,5 +20,5 @@ use pallet_revive_eth_rpc::cli;
 
 fn main() -> anyhow::Result<()> {
 	let cmd = cli::CliCommand::parse();
-	cli::run(cmd)
+	cli::run_parser(cmd)
 }

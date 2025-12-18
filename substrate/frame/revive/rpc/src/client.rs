@@ -20,11 +20,7 @@
 pub(crate) mod runtime_api;
 pub(crate) mod storage_api;
 
-use crate::{
-	subxt_client::{self, revive::calls::types::EthTransact, SrcChainConfig},
-	BlockInfoProvider, BlockTag, FeeHistoryProvider, ReceiptProvider, SubxtBlockInfoProvider,
-	TracerType, TransactionInfo,
-};
+use crate::{subxt_client::{self, revive::calls::types::EthTransact, SrcChainConfig}, BlockInfo, BlockInfoProvider, BlockTag, FeeHistoryProvider, ReceiptProvider, SubxtBlockInfoProvider, TracerType, TransactionInfo};
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use pallet_revive::{
 	evm::{
@@ -35,9 +31,10 @@ use pallet_revive::{
 	EthTransactError,
 };
 use runtime_api::RuntimeApi;
-use sp_runtime::traits::Block as BlockT;
+use sp_runtime::traits::{Block as BlockT, CheckedConversion};
 use sp_weights::Weight;
 use std::{ops::Range, sync::Arc, time::Duration};
+use log::logger;
 use storage_api::StorageApi;
 use subxt::{
 	backend::{
@@ -53,6 +50,8 @@ use subxt::{
 };
 use thiserror::Error;
 use tokio::sync::Mutex;
+use pallet_revive::precompiles::alloy::sol_types::sol_data::Bool;
+use sc_cli::OutputType::Json;
 
 /// The substrate block type.
 pub type SubstrateBlock = subxt::blocks::Block<SrcChainConfig, OnlineClient<SrcChainConfig>>;
@@ -178,6 +177,7 @@ pub struct Client {
 	block_notifier: Option<tokio::sync::broadcast::Sender<H256>>,
 	/// A lock to ensure only one subscription can perform write operations at a time.
 	subscription_lock: Arc<Mutex<()>>,
+	finish_prev_parsing: Arc<Mutex<bool>>,
 }
 
 /// Fetch the chain ID from the substrate chain.
@@ -251,6 +251,7 @@ impl Client {
 			block_notifier: automine
 				.then(|| tokio::sync::broadcast::channel::<H256>(NOTIFIER_CAPACITY).0),
 			subscription_lock: Arc::new(Mutex::new(())),
+			finish_prev_parsing: Arc::new(Mutex::new(false)),
 		};
 
 		Ok(client)
@@ -406,6 +407,85 @@ impl Client {
 		.await?;
 
 		log::info!(target: LOG_TARGET, "🗄️ Finished indexing past blocks");
+		Ok(())
+	}
+
+	/// Start the block subscription, and populate the block cache.
+	pub async fn get_parsing_blocks(
+		&self,
+		index_last_n_blocks: u32
+	) -> Result<(), ClientError> {
+		let mut latest_block = self.latest_finalized_block().await.number();
+		let mut current_block = latest_block - index_last_n_blocks;
+
+		log::info!(target: LOG_TARGET, "🔌 From Block: {}", current_block);
+
+		loop {
+			let block = self
+				.block_provider
+				.block_by_number(current_block)
+				.await?
+				.ok_or(ClientError::BlockNotFound)?;
+
+			self.process_block_data(&block).await?;
+
+			if current_block >= latest_block {
+				latest_block = self.latest_finalized_block().await.number();
+
+				log::info!(target: LOG_TARGET, "Updated Latest Block: {}", current_block);
+
+				if current_block >= latest_block {
+					// Set finish_prev_parsing to true
+					let mut finish_prev_parsing = self.finish_prev_parsing.lock().await;
+					*finish_prev_parsing = true;
+					break;
+				}
+			}
+
+			current_block += 1;
+		}
+		Ok(())
+	}
+
+	/// Start the block subscription, and populate the block cache.
+	pub async fn subscribe_latest_blocks(
+		&self,
+		subscription_type: SubscriptionType,
+	) -> Result<(), ClientError> {
+		log::info!(target: LOG_TARGET, "🔌 Subscribing to new blocks ({subscription_type:?})");
+
+		self.subscribe_new_blocks(
+			subscription_type,
+			|block| async move {
+
+				let start_realtime_parsing = *self.finish_prev_parsing.lock().await;
+
+				if start_realtime_parsing {
+					self.process_block_data(&block).await?;
+				}
+
+				self.block_provider.update_latest(Arc::new(block), subscription_type).await;
+				Ok(())
+			}
+		)
+			.await?;
+		Ok(())
+	}
+
+	pub async fn process_block_data(
+		&self,
+		block: &SubstrateBlock,
+	) -> Result<(), ClientError> {
+		let hash = block.hash();
+		log::info!(target: LOG_TARGET, "Process Block: {}", block.number());
+		let evm_block = self.runtime_api(hash).eth_block().await?;
+		let receipts = self
+			.receipt_provider
+			.receipts_from_block(&block)
+			.await?;
+
+		// Push to Kafka
+
 		Ok(())
 	}
 
