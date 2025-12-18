@@ -177,6 +177,8 @@ pub struct Client {
 	block_notifier: Option<tokio::sync::broadcast::Sender<H256>>,
 	/// A lock to ensure only one subscription can perform write operations at a time.
 	subscription_lock: Arc<Mutex<()>>,
+	/// Kafka producer for indexing.
+	kafka_producer: Option<crate::kafka_producer::KafkaProducer>,
 	finish_prev_parsing: Arc<Mutex<bool>>,
 }
 
@@ -232,11 +234,29 @@ impl Client {
 		rpc: LegacyRpcMethods<SrcChainConfig>,
 		block_provider: SubxtBlockInfoProvider,
 		receipt_provider: ReceiptProvider,
+		kafka_brokers: Option<String>,
 	) -> Result<Self, ClientError> {
 		let (chain_id, max_block_weight, automine) =
 			tokio::try_join!(chain_id(&api), max_block_weight(&api), async {
 				Ok(get_automine(&rpc_client).await)
 			},)?;
+
+		// Initialize Kafka producer if brokers provided
+		let kafka_producer = match kafka_brokers {
+			Some(brokers) => {
+				match crate::kafka_producer::KafkaProducer::new(&brokers) {
+					Ok(producer) => {
+						log::info!(target: LOG_TARGET, "Kafka producer initialized successfully");
+						Some(producer)
+					}
+					Err(e) => {
+						log::error!(target: LOG_TARGET, "Failed to initialize Kafka producer: {:?}", e);
+						None
+					}
+				}
+			}
+			None => None,
+		};
 
 		let client = Self {
 			api,
@@ -251,6 +271,7 @@ impl Client {
 			block_notifier: automine
 				.then(|| tokio::sync::broadcast::channel::<H256>(NOTIFIER_CAPACITY).0),
 			subscription_lock: Arc::new(Mutex::new(())),
+			kafka_producer,
 			finish_prev_parsing: Arc::new(Mutex::new(false)),
 		};
 
@@ -484,7 +505,26 @@ impl Client {
 			.receipts_from_block(&block)
 			.await?;
 
-		// Push to Kafka
+		let recepts_data = serde_json::to_string(&receipts).unwrap();
+		let evm_block_data = serde_json::to_string(&evm_block).unwrap();
+
+
+		// Only send to Kafka for finalized blocks to avoid duplicates
+		if let Some(kafka_producer) = &self.kafka_producer {
+			let block_key = block.number().to_string();
+			let mut block_json: serde_json::Value = serde_json::from_str(&evm_block_data)
+				.unwrap_or(serde_json::json!({}));
+
+			if let Some(block_obj) = block_json.as_object_mut() {
+				let receipts_json: serde_json::Value = serde_json::from_str(&recepts_data)
+					.unwrap_or(serde_json::json!([]));
+				block_obj.insert("receipts".to_string(), receipts_json);
+			}
+
+			if let Err(e) = kafka_producer.send_message("block_data", &block_key, block_json).await {
+				log::error!(target: LOG_TARGET, "Failed to send block data to Kafka: {:?}", e);
+			}
+		}
 
 		Ok(())
 	}
