@@ -326,7 +326,7 @@ pub fn run_parser(cmd: CliCommand)  -> anyhow::Result<()> {
 		.spawn_essential_handle()
 		.spawn("block-subscription", None, async move {
 			let mut futures: Vec<BoxFuture<'_, Result<(), _>>> = vec![
-				Box::pin(client.subscribe_latest_blocks(SubscriptionType::FinalizedBlocks)),
+				Box::pin(client.subscribe_latest_blocks(SubscriptionType::BestBlocks)),
 				Box::pin(client.get_parsing_blocks(index_last_n_blocks.unwrap_or(0)))
 			];
 
